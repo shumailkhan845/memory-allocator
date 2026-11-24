@@ -1,3 +1,4 @@
+
 #define _DEFAULT_SOURCE
 
 #include "allocator.h"
@@ -20,15 +21,32 @@ union block
     max_align_t alignment;
 };
 
+#define ALIGNMENT _Alignof(max_align_t)
+
 static block_t *head = NULL;
 static block_t *tail = NULL;
+
+static size_t align_size(size_t size)
+{
+    size_t remainder = size % ALIGNMENT;
+
+    if (remainder == 0)
+        return size;
+
+    return size + (ALIGNMENT - remainder);
+}
 
 void *my_malloc(size_t size)
 {
     if (size == 0)
         return NULL;
 
-    /* 1. Search existing blocks for reusable memory. */
+    if (size > SIZE_MAX - (ALIGNMENT - 1))
+        return NULL;
+
+    size_t aligned_size = align_size(size);
+
+    /* First-fit search */
     block_t *current = head;
 
     while (current != NULL)
@@ -42,23 +60,34 @@ void *my_malloc(size_t size)
         current = current->meta.next;
     }
 
-    /* 2. Check for size overflow before requesting memory. */
-    if (size > SIZE_MAX - sizeof(block_t))
+    if (aligned_size > SIZE_MAX - sizeof(block_t) - (ALIGNMENT - 1))
         return NULL;
 
-    size_t total_size = sizeof(block_t) + size;
+    size_t padding = 0;
+    void *program_break = sbrk(0);
 
-    /* 3. Request a new block from the OS. */
-    block_t *block = sbrk(total_size);
-
-    if (block == (void *)-1)
+    if (program_break == (void *)-1)
         return NULL;
 
-    block->meta.size = size;
+    uintptr_t address = (uintptr_t)program_break;
+    size_t remainder = address % ALIGNMENT;
+
+    if (remainder != 0)
+        padding = ALIGNMENT - remainder;
+
+    size_t total_size = padding + sizeof(block_t) + aligned_size;
+
+    void *allocation = sbrk(total_size);
+
+    if (allocation == (void *)-1)
+        return NULL;
+
+    block_t *block = (block_t *)((char *)allocation + padding);
+
+    block->meta.size = aligned_size;
     block->meta.free = 0;
     block->meta.next = NULL;
 
-    /* 4. Append the block to our linked list. */
     if (head == NULL)
     {
         head = block;
@@ -70,7 +99,6 @@ void *my_malloc(size_t size)
         tail = block;
     }
 
-    /* 5. Return the payload, not the header. */
     return (void *)(block + 1);
 }
 
@@ -79,9 +107,7 @@ void my_free(void *ptr)
     if (ptr == NULL)
         return;
 
-    /* Recover the header immediately before the payload. */
     block_t *block = (block_t *)ptr - 1;
 
-    /* Make this block available for future allocations. */
     block->meta.free = 1;
 }
